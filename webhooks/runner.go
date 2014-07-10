@@ -10,8 +10,8 @@ import (
 var (
 	batchFinder    BatchFinder
 	batchProcessor BatchProcessor
-	batchSender BatchSender
-	subFinder SubFinder
+	batchSender    BatchSender
+	subFinder      SubFinder
 
 	Redis *redis.Client
 )
