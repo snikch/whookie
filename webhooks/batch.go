@@ -176,7 +176,7 @@ func (p RedisBatchProcessor) ProcessBatch(batch Batch, out chan<- bool) {
 
 	completeChan := make(chan error, subsLen)
 	for _, sub := range subs {
-		go func(ch chan<- error) {
+		go func(sub Sub, ch chan<- error) {
 			err := batchSender.Send(batch, sub)
 			if err != nil {
 				logger.Error(err)
@@ -185,7 +185,7 @@ func (p RedisBatchProcessor) ProcessBatch(batch Batch, out chan<- bool) {
 			}
 
 			ch <- nil
-		}(completeChan)
+		}(sub, completeChan)
 	}
 
 	didHaveError := false
