@@ -4,7 +4,7 @@ import "time"
 
 func main() {
 	runner := newRunner(time.Second)
-	<-time.After(10 * time.Second)
+	<-time.After(6000 * time.Second)
 
 	runner.Stop()
 }

@@ -16,6 +16,7 @@ var (
 	Redis *redis.Client
 )
 
+// init sets up the default implementations of various interfaces.
 func init() {
 	batchFinder = newBatchFinder()
 	batchProcessor = newBatchProcessor()
@@ -27,15 +28,16 @@ func init() {
 	if err != nil {
 		panic(err)
 	}
-
 }
 
+// Runner is responsible for processing ready batches at the given interval.
 type Runner struct {
 	interval time.Duration
 	stopChan chan bool
 	running  bool
 }
 
+// newRunner creates a runner with the supplied interval between polls.
 func newRunner(interval time.Duration) Runner {
 	r := Runner{
 		interval: interval,
@@ -46,6 +48,7 @@ func newRunner(interval time.Duration) Runner {
 	return r
 }
 
+// Stop will stop the runner after the current batches finish processing.
 func (r Runner) Stop() error {
 	if !r.running {
 		return fmt.Errorf("Attempting to stop a stopped Runner")
@@ -55,6 +58,8 @@ func (r Runner) Stop() error {
 	return nil
 }
 
+// run is a blocking runner that processes ready batches at the given interval.
+// Sending on the stopChan will let the current batch finish, then complete.
 func (r Runner) run() {
 	timer := time.NewTimer(time.Nanosecond * 0)
 RUN:
@@ -63,9 +68,8 @@ RUN:
 		case <-r.stopChan:
 			break RUN
 		case <-timer.C:
-			batches, err := batchFinder.ReadyBatches()
+			batches, err := batchFinder.ReadyBatchKeys()
 			if err != nil {
-				//TODO log error
 				logger.Error("Failed to retrieve batches:", err.Error())
 				continue
 			}
