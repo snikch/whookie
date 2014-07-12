@@ -228,7 +228,7 @@ func (s HttpBatchSender) Send(batch Batch, sub Sub) error {
 
 	logger.Infof("Sending batch with %d events to %s", len(batch.Events), sub.URL)
 
-	body, err := json.Marshal(filtered)
+	body, err := json.Marshal(filtered.Events)
 	if err != nil {
 		return err
 	}
