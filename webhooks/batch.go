@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -177,9 +178,27 @@ func (p RedisBatchProcessor) ProcessBatch(batch Batch, out chan<- bool) {
 	completeChan := make(chan error, subsLen)
 	for _, sub := range subs {
 		go func(sub Sub, ch chan<- error) {
-			err := batchSender.Send(batch, sub)
+			ok, err := batchSender.Send(batch, sub)
+
+			// Log error immediately
 			if err != nil {
 				logger.Error(err)
+			}
+
+			// Send to the failure manager if it failed to send.
+			// Errors saving to the failure manager take priority over
+			// any error from the previous operation, hence the order here.
+			if !ok {
+				err := batchSender.Fail(batch, sub)
+				if err != nil {
+					logger.Error(err)
+					ch <- err
+					return
+				}
+			}
+
+			// Pass any error back via the channel
+			if err != nil {
 				ch <- err
 				return
 			}
@@ -203,12 +222,15 @@ func (p RedisBatchProcessor) ProcessBatch(batch Batch, out chan<- bool) {
 	} else {
 		logger.Error("Batch Process had error, leaving batch for retry")
 	}
+
 	out <- true
+	 // TODO(mc): Clear up batch
 }
 
 // BatchSender is responsible for sending a batch to a sub.
 type BatchSender interface {
-	Send(Batch, Sub) error
+	Send(Batch, Sub) (bool, error)
+	Fail(Batch, Sub) error
 }
 
 func newBatchSender() HttpBatchSender {
@@ -218,25 +240,40 @@ func newBatchSender() HttpBatchSender {
 type HttpBatchSender struct{}
 
 // Send will submit the batch to the given sub according to the sub configuration.
-func (s HttpBatchSender) Send(batch Batch, sub Sub) error {
+// Anything which is considered an error at the client end shall return false, nil
+// Anything which is an error at the server end shall return true, err
+func (s HttpBatchSender) Send(batch Batch, sub Sub) (bool, error) {
 	// New batch with events filtered for this sub
 	filtered, send := batch.Filtered(sub)
 	if !send {
 		logger.Infof("Not sending batch to %s, no valid events", sub.URL)
-		return nil
+		return true, nil
 	}
 
 	logger.Infof("Sending batch with %d events to %s", len(batch.Events), sub.URL)
 
+	key := fmt.Sprintf("%s:%s", batch.Timestamp, sub.URL)
+	rootKey := fmt.Sprintf("webhooks:batches:%s", batch.DomainId)
+
+	// Set the state to sending
+	_, err := Redis.HSet(
+		fmt.Sprintf("%s:status", rootKey),
+		key,
+		"sending",
+	).Result()
+	if err != nil {
+		return true, err
+	}
+
 	body, err := json.Marshal(filtered.Events)
 	if err != nil {
-		return err
+		return true, err
 	}
 
 	// Create a new post request to the sub url, with the event payload.
 	req, err := http.NewRequest("POST", sub.URL, strings.NewReader(string(body)))
 	if err != nil {
-		return err
+		return true, err
 	}
 
 	// Add headers
@@ -246,11 +283,73 @@ func (s HttpBatchSender) Send(batch Batch, sub Sub) error {
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return err
+		return true, err
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("Expected 2xx response, received %d", resp.StatusCode)
+		logger.Noticef("Expected 2xx response, received %d", resp.StatusCode)
+		return false, nil
 	}
-	return nil
+
+	// Set the state to sent
+	_, err = Redis.HSet(
+		fmt.Sprintf("%s:status", rootKey),
+		key,
+		"sent",
+	).Result()
+	if err != nil {
+		return true, err
+	}
+
+	logger.Infof("Successfully sent %s to %s", batch.Key(), sub.URL)
+
+	return true, nil
+}
+
+// Fail is responsible for placing the batch sub combo into failed state
+// and setting retry count, time etc.
+func (s HttpBatchSender) Fail(batch Batch, sub Sub) error {
+	logger.Noticef("Failed to send %s to %s ", batch.Key(), sub.URL)
+	tx := Redis.Multi()
+	defer tx.Close()
+
+	key := fmt.Sprintf("%s:%s", batch.Timestamp, sub.URL)
+	rootKey := fmt.Sprintf("webhooks:batches:%s", batch.DomainId)
+
+	// Set the state to failed
+	_, err := tx.HSet(
+		fmt.Sprintf("%s:status", rootKey),
+		key,
+		"resend",
+	).Result()
+	if err != nil {
+		return err
+	}
+
+	// Update the retry count
+	count, err := tx.Incr(
+		fmt.Sprintf("%s:%s:retries", rootKey, sub.URL),
+	).Result()
+	if err != nil {
+		return err
+	}
+
+	// Set the next send time
+	resendTime := time.Now().Add(
+		backoffDuration(int(count)),
+	)
+	resendTimeStr := fmt.Sprintf("%d", resendTime.Unix())
+	_, err = tx.HSet(fmt.Sprintf("%s:retries", rootKey), key, resendTimeStr).Result()
+	if err != nil {
+		return err
+	}
+
+	_, err = tx.Exec(func() error { return nil })
+
+	return err
+}
+
+func backoffDuration(retryCount int) time.Duration {
+	seconds := math.Pow(float64(retryCount), 4) + 15
+	return time.Second * time.Duration(seconds)
 }

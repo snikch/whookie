@@ -3,9 +3,14 @@ package main
 import "fmt"
 
 type Sub struct {
-	Events  []string
-	Headers map[string]string
-	URL     string
+	DomainId string
+	Events   []string
+	Headers  map[string]string
+	URL      string
+}
+
+func (s Sub) Key() string {
+	return s.DomainId + ":" + s.URL
 }
 
 type SubFinder interface {
@@ -44,7 +49,8 @@ func (f RedisSubFinder) Subs(domainId string) ([]Sub, error) {
 func (f RedisSubFinder) Sub(domainId, url string) (Sub, error) {
 
 	sub := Sub{
-		URL: url,
+		URL:      url,
+		DomainId: domainId,
 	}
 
 	headers, err := Redis.HGetAllMap(
