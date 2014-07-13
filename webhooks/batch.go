@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/go-redis/redis"
 )
 
 var (
@@ -148,7 +150,7 @@ func (f RedisBatchFinder) Batch(key string) (Batch, error) {
 
 // BatchProcessor is responsible for the processing of batches to their subs.
 type BatchProcessor interface {
-	ProcessBatch(Batch, chan<- bool)
+	ProcessBatch(Batch) error
 }
 
 func newBatchProcessor() RedisBatchProcessor {
@@ -159,13 +161,11 @@ type RedisBatchProcessor struct {
 }
 
 // ProcessBatch gets any subs from redis, and sends the batch to the sub.
-func (p RedisBatchProcessor) ProcessBatch(batch Batch, out chan<- bool) {
+func (p RedisBatchProcessor) ProcessBatch(batch Batch) error {
 
 	subs, err := subFinder.Subs(batch.DomainId)
 	if err != nil {
-		logger.Errorf("Couldn’t retrieve subscriptions: %s", err)
-		out <- true
-		return
+		return err
 	}
 
 	subsLen := len(subs)
@@ -175,56 +175,77 @@ func (p RedisBatchProcessor) ProcessBatch(batch Batch, out chan<- bool) {
 		logger.Infof("Found %d subscriptions for %s", subsLen, batch.Key())
 	}
 
-	completeChan := make(chan error, subsLen)
+	tx := Redis.Multi()
+	defer tx.Close()
+
 	for _, sub := range subs {
-		go func(sub Sub, ch chan<- error) {
-			ok, err := batchSender.Send(batch, sub)
-
-			// Log error immediately
-			if err != nil {
-				logger.Error(err)
-			}
-
-			// Send to the failure manager if it failed to send.
-			// Errors saving to the failure manager take priority over
-			// any error from the previous operation, hence the order here.
-			if !ok {
-				err := batchSender.Fail(batch, sub)
-				if err != nil {
-					logger.Error(err)
-					ch <- err
-					return
-				}
-			}
-
-			// Pass any error back via the channel
-			if err != nil {
-				ch <- err
-				return
-			}
-
-			ch <- nil
-		}(sub, completeChan)
-	}
-
-	didHaveError := false
-	for i := 0; i < subsLen; i++ {
-		err := <-completeChan
+		err := p.PersistBatch(tx, batch, sub)
 		if err != nil {
-			didHaveError = true
+			logger.Errorf("Error processing batch: %s", err.Error())
+			err = tx.Discard()
+			return err
 		}
 	}
-	if !didHaveError {
-		_, err = Redis.SRem("webhooks:batches:current", batch.Key()).Result()
-		if err != nil {
-			logger.Error(err)
-		}
-	} else {
-		logger.Error("Batch Process had error, leaving batch for retry")
+
+	_, err = tx.Del(fmt.Sprintf("webhooks:batches:%s", batch.Key())).Result()
+	if err != nil {
+		logger.Errorf("Error removing batch events: %s", err.Error())
+		err = tx.Discard()
+		return err
 	}
 
-	out <- true
-	 // TODO(mc): Clear up batch
+	_, err = tx.SRem("webhooks:batches:current", batch.Key()).Result()
+	if err != nil {
+		logger.Errorf("Error removing batch from current: %s", err.Error())
+		err = tx.Discard()
+		return err
+	}
+
+	_, err = tx.Exec(func() error { return nil })
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (p RedisBatchProcessor) PersistBatch(tx *redis.Multi, batch Batch, sub Sub) error {
+	// New batch with events filtered for this sub
+	filtered, send := batch.Filtered(sub)
+	if !send {
+		logger.Infof(
+			"Not sending batch to %s, no of the %d events are valid",
+			sub.URL,
+			len(batch.Events),
+		)
+		return nil
+	}
+
+	payload, err := json.Marshal(filtered.Events)
+	if err != nil {
+		return err
+	}
+
+	rootKey := fmt.Sprintf("webhooks:sends:%s", batch.DomainId)
+	sendKey := batch.Timestamp + ":" + sub.URL
+
+	_, err = tx.HSet(rootKey+":events", sendKey, string(payload)).Result()
+	if err != nil {
+		return err
+	}
+
+	lenStr := fmt.Sprintf("%d", len(filtered.Events))
+	_, err = tx.HSet(rootKey+":count", sendKey, lenStr).Result()
+	if err != nil {
+		return err
+	}
+
+	_, err = tx.SAdd("webhooks:sends:ready", batch.Key()+":"+sub.URL).Result()
+	if err != nil {
+		return err
+	}
+	logger.Infof("Added send with %d events", len(filtered.Events))
+
+	return nil
 }
 
 // BatchSender is responsible for sending a batch to a sub.
@@ -243,12 +264,6 @@ type HttpBatchSender struct{}
 // Anything which is considered an error at the client end shall return false, nil
 // Anything which is an error at the server end shall return true, err
 func (s HttpBatchSender) Send(batch Batch, sub Sub) (bool, error) {
-	// New batch with events filtered for this sub
-	filtered, send := batch.Filtered(sub)
-	if !send {
-		logger.Infof("Not sending batch to %s, no valid events", sub.URL)
-		return true, nil
-	}
 
 	logger.Infof("Sending batch with %d events to %s", len(batch.Events), sub.URL)
 
@@ -265,7 +280,7 @@ func (s HttpBatchSender) Send(batch Batch, sub Sub) (bool, error) {
 		return true, err
 	}
 
-	body, err := json.Marshal(filtered.Events)
+	body, err := json.Marshal(batch.Events)
 	if err != nil {
 		return true, err
 	}
