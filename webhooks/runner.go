@@ -120,6 +120,8 @@ RUN:
 
 			if batchesLen > 0 {
 				logger.Infof("Found %d new batches", batchesLen)
+			} else {
+				logger.Infof("No new batches")
 			}
 
 			for _, batch := range batches {
@@ -185,6 +187,8 @@ RUN:
 
 			if count > 0 {
 				logger.Infof("Moved %d retries to ready queue", count)
+			} else {
+				logger.Infof("No retries ready")
 			}
 
 			timer.Reset(r.interval)
