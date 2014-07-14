@@ -1,14 +1,17 @@
 package main
 
 import (
+	"log"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
+
+	"github.com/snikch/go-webhooks/webhooks"
 )
 
 func main() {
-	runner := newRunner(time.Second)
+	runner := webhooks.NewRunner(time.Second)
 
 	// Create a channel to watch for quit syscalls
 	quitCh := make(chan os.Signal, 2)
@@ -16,14 +19,15 @@ func main() {
 
 	// Wait on a quit signal
 	sig := <-quitCh
-	logger.Noticef("Signal received: %s", sig)
-	logger.Noticef("Attempting graceful shutdown")
+	log.Printf("Signal received: %s", sig)
+	log.Printf("Attempting graceful shutdown")
+	log.Printf("Sending SIGINT or SIGQUIT again will force exit with possible data loss")
 
 	// Start a goroutine that can force quit the app if second signal received
 	go func() {
 		sig := <-quitCh
-		logger.Noticef("Second signal received: %s", sig)
-		logger.Noticef("Forcing exit")
+		log.Printf("Second signal received: %s", sig)
+		log.Printf("Forcing exit")
 		os.Exit(1)
 	}()
 

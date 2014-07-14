@@ -1,4 +1,4 @@
-package main
+package webhooks
 
 import (
 	"fmt"
@@ -36,8 +36,8 @@ func init() {
 	retryTx = Redis.Multi()
 }
 
-// Runner is responsible for processing ready batches at the given interval.
-type Runner struct {
+// runner is responsible for processing ready batches at the given interval.
+type runner struct {
 	interval       time.Duration
 	currentStopper chan bool
 	readyStopper   chan bool
@@ -46,9 +46,9 @@ type Runner struct {
 	sendWaitGroup  *sync.WaitGroup
 }
 
-// newRunner creates a runner with the supplied interval between polls.
-func newRunner(interval time.Duration) Runner {
-	r := Runner{
+// Newrunner creates a runner with the supplied interval between polls.
+func NewRunner(interval time.Duration) runner {
+	r := runner{
 		interval:       interval,
 		currentStopper: make(chan bool),
 		readyStopper:   make(chan bool),
@@ -63,9 +63,9 @@ func newRunner(interval time.Duration) Runner {
 }
 
 // Stop will stop the runner after the current batches finish processing.
-func (r Runner) Stop() error {
+func (r runner) Stop() error {
 	if !r.running {
-		return fmt.Errorf("Attempting to stop a stopped Runner")
+		return fmt.Errorf("Attempting to stop a stopped runner")
 	}
 
 	logger.Info("Stopping runner")
@@ -102,7 +102,7 @@ func (r Runner) Stop() error {
 
 // run is a blocking runner that processes ready batches at the given interval.
 // Sending on the stopChan will let the current batch finish, then complete.
-func (r Runner) processCurrent() {
+func (r runner) processCurrent() {
 	timer := time.NewTimer(time.Nanosecond * 0)
 RUN:
 	for {
@@ -134,7 +134,7 @@ RUN:
 	}
 
 }
-func (r Runner) processReady() {
+func (r runner) processReady() {
 	timer := time.NewTimer(time.Nanosecond * 0)
 RUN:
 	for {
@@ -166,7 +166,7 @@ RUN:
 		}
 	}
 }
-func (r Runner) processRetry() {
+func (r runner) processRetry() {
 	timer := time.NewTimer(time.Nanosecond * 0)
 RUN:
 	for {

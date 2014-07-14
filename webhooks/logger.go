@@ -1,5 +1,5 @@
 // Logger is a simple logging interface.
-package main
+package webhooks
 
 import (
 	"io"
