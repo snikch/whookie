@@ -12,16 +12,17 @@ var logger Logger
 
 func init() {
 	logger = Logger{}
+	flags := log.LstdFlags
 	if os.Getenv("LOG_OUTPUT") == "syslog" {
-		logger.info, _ = syslog.NewLogger(syslog.LOG_INFO, log.LstdFlags)
-		logger.notice, _ = syslog.NewLogger(syslog.LOG_NOTICE, log.LstdFlags)
-		logger.warning, _ = syslog.NewLogger(syslog.LOG_WARNING, log.LstdFlags)
-		logger.error, _ = syslog.NewLogger(syslog.LOG_ERR, log.LstdFlags)
+		logger.info, _ = syslog.NewLogger(syslog.LOG_INFO, flags)
+		logger.notice, _ = syslog.NewLogger(syslog.LOG_NOTICE, flags)
+		logger.warning, _ = syslog.NewLogger(syslog.LOG_WARNING, flags)
+		logger.error, _ = syslog.NewLogger(syslog.LOG_ERR, flags)
 	} else {
-		logger.info = log.New(os.Stdout, "INFO ", log.LstdFlags)
-		logger.notice = log.New(os.Stdout, "NOTICE ", log.LstdFlags)
-		logger.warning = log.New(os.Stdout, "WARNING ", log.LstdFlags)
-		logger.error = log.New(os.Stderr, "ERROR ", log.LstdFlags)
+		logger.info = log.New(os.Stdout, "INFO ", flags)
+		logger.notice = log.New(os.Stdout, "NOTICE ", flags)
+		logger.warning = log.New(os.Stdout, "WARNING ", flags)
+		logger.error = log.New(os.Stderr, "ERROR ", flags)
 	}
 }
 
@@ -33,10 +34,11 @@ type Logger struct {
 }
 
 func SetLoggerOutput(l Logger, w io.Writer) {
-	l.info = log.New(w, "INFO ", log.LstdFlags)
-	l.notice = log.New(w, "NOTICE ", log.LstdFlags)
-	l.warning = log.New(w, "WARNING ", log.LstdFlags)
-	l.error = log.New(w, "ERROR ", log.LstdFlags)
+	flags := log.LstdFlags
+	l.info = log.New(w, "INFO ", flags)
+	l.notice = log.New(w, "NOTICE ", flags)
+	l.warning = log.New(w, "WARNING ", flags)
+	l.error = log.New(w, "ERROR ", flags)
 }
 
 func (l Logger) Info(messages ...interface{}) {

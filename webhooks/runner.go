@@ -12,9 +12,12 @@ var (
 	batchFinder    BatchFinder
 	batchProcessor BatchProcessor
 	batchSender    BatchSender
+	readyFinder    ReadyFinder
 	subFinder      SubFinder
 
 	Redis *redis.Client
+
+	retryTx *redis.Multi
 )
 
 // init sets up the default implementations of various interfaces.
@@ -22,6 +25,7 @@ func init() {
 	batchFinder = newBatchFinder()
 	batchProcessor = newBatchProcessor()
 	batchSender = newBatchSender()
+	readyFinder = newReadyFinder()
 	subFinder = newSubFinder()
 
 	var err error
@@ -29,6 +33,7 @@ func init() {
 	if err != nil {
 		panic(err)
 	}
+	retryTx = Redis.Multi()
 }
 
 // Runner is responsible for processing ready batches at the given interval.
@@ -38,6 +43,7 @@ type Runner struct {
 	readyStopper   chan bool
 	resendStopper  chan bool
 	running        bool
+	sendWaitGroup  *sync.WaitGroup
 }
 
 // newRunner creates a runner with the supplied interval between polls.
@@ -48,9 +54,11 @@ func newRunner(interval time.Duration) Runner {
 		readyStopper:   make(chan bool),
 		resendStopper:  make(chan bool),
 		running:        true,
+		sendWaitGroup:  &sync.WaitGroup{},
 	}
 	go r.processCurrent()
 	go r.processReady()
+	go r.processRetry()
 	return r
 }
 
@@ -63,28 +71,31 @@ func (r Runner) Stop() error {
 	logger.Info("Stopping runner")
 	wg := sync.WaitGroup{}
 
+	wg.Add(1)
 	go func() {
-		wg.Add(1)
 		r.currentStopper <- true
 		logger.Info("Stopped processing current batches")
 		wg.Done()
 	}()
 
+	wg.Add(1)
 	go func() {
-		wg.Add(1)
 		r.readyStopper <- true
 		logger.Info("Stopped processing ready batches")
 		wg.Done()
 	}()
 
+	wg.Add(1)
 	go func() {
-		wg.Add(1)
 		r.resendStopper <- true
 		logger.Info("Stopped processing retry batches")
 		wg.Done()
 	}()
 
 	wg.Wait()
+	logger.Info("Waiting for any sending batches to complete")
+	r.sendWaitGroup.Wait()
+	logger.Info("No more sending batches")
 	r.running = false
 	return nil
 }
@@ -107,7 +118,9 @@ RUN:
 
 			batchesLen := len(batches)
 
-			logger.Infof("Found %d batches", batchesLen)
+			if batchesLen > 0 {
+				logger.Infof("Found %d new batches", batchesLen)
+			}
 
 			for _, batch := range batches {
 				err := batchProcessor.ProcessBatch(batch)
@@ -126,15 +139,34 @@ func (r Runner) processReady() {
 RUN:
 	for {
 		select {
-		case <-r.currentStopper:
+		case <-r.readyStopper:
 			break RUN
 		case <-timer.C:
 
-			timer.Reset(r.interval)
+			batch, sub, err := readyFinder.NextReady()
+
+			if err != nil {
+				logger.Error("Error getting next ready to send", err.Error())
+				timer.Reset(r.interval)
+				continue
+			}
+
+			// No batch? Wait and try again.
+			if batch == nil || sub == nil {
+				timer.Reset(r.interval)
+				continue
+			}
+
+			go func() {
+				r.sendWaitGroup.Add(1)
+				batchSender.Send(*batch, *sub)
+				r.sendWaitGroup.Done()
+			}()
+			timer.Reset(0 * time.Nanosecond)
 		}
 	}
 }
-func (r Runner) processResend() {
+func (r Runner) processRetry() {
 	timer := time.NewTimer(time.Nanosecond * 0)
 RUN:
 	for {
@@ -142,6 +174,18 @@ RUN:
 		case <-r.resendStopper:
 			break RUN
 		case <-timer.C:
+
+			count, err := readyFinder.ProcessReadyRetries()
+
+			if err != nil {
+				logger.Errorf("Error processing ready retries: %s", err.Error())
+				timer.Reset(r.interval)
+				continue
+			}
+
+			if count > 0 {
+				logger.Infof("Moved %d retries to ready queue", count)
+			}
 
 			timer.Reset(r.interval)
 		}

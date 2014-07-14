@@ -220,7 +220,7 @@ func (p RedisBatchProcessor) PersistBatch(tx *redis.Multi, batch Batch, sub Sub)
 		return nil
 	}
 
-	payload, err := json.Marshal(filtered.Events)
+	payload, err := json.Marshal(filtered)
 	if err != nil {
 		return err
 	}
@@ -228,7 +228,7 @@ func (p RedisBatchProcessor) PersistBatch(tx *redis.Multi, batch Batch, sub Sub)
 	rootKey := fmt.Sprintf("webhooks:sends:%s", batch.DomainId)
 	sendKey := batch.Timestamp + ":" + sub.URL
 
-	_, err = tx.HSet(rootKey+":events", sendKey, string(payload)).Result()
+	_, err = tx.HSet(rootKey+":batch", sendKey, string(payload)).Result()
 	if err != nil {
 		return err
 	}
@@ -250,8 +250,9 @@ func (p RedisBatchProcessor) PersistBatch(tx *redis.Multi, batch Batch, sub Sub)
 
 // BatchSender is responsible for sending a batch to a sub.
 type BatchSender interface {
-	Send(Batch, Sub) (bool, error)
-	Fail(Batch, Sub) error
+	Send(Batch, Sub)
+	Retry(Batch, Sub)
+	Fail(Batch, Sub, error)
 }
 
 func newBatchSender() HttpBatchSender {
@@ -263,8 +264,7 @@ type HttpBatchSender struct{}
 // Send will submit the batch to the given sub according to the sub configuration.
 // Anything which is considered an error at the client end shall return false, nil
 // Anything which is an error at the server end shall return true, err
-func (s HttpBatchSender) Send(batch Batch, sub Sub) (bool, error) {
-
+func (s HttpBatchSender) Send(batch Batch, sub Sub) {
 	logger.Infof("Sending batch with %d events to %s", len(batch.Events), sub.URL)
 
 	key := fmt.Sprintf("%s:%s", batch.Timestamp, sub.URL)
@@ -277,18 +277,21 @@ func (s HttpBatchSender) Send(batch Batch, sub Sub) (bool, error) {
 		"sending",
 	).Result()
 	if err != nil {
-		return true, err
+		s.Fail(batch, sub, err)
+		return
 	}
 
 	body, err := json.Marshal(batch.Events)
 	if err != nil {
-		return true, err
+		s.Fail(batch, sub, err)
+		return
 	}
 
 	// Create a new post request to the sub url, with the event payload.
 	req, err := http.NewRequest("POST", sub.URL, strings.NewReader(string(body)))
 	if err != nil {
-		return true, err
+		s.Fail(batch, sub, err)
+		return
 	}
 
 	// Add headers
@@ -298,12 +301,14 @@ func (s HttpBatchSender) Send(batch Batch, sub Sub) (bool, error) {
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return true, err
+		s.Fail(batch, sub, err)
+		return
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		logger.Noticef("Expected 2xx response, received %d", resp.StatusCode)
-		return false, nil
+		s.Retry(batch, sub)
+		return
 	}
 
 	// Set the state to sent
@@ -313,55 +318,59 @@ func (s HttpBatchSender) Send(batch Batch, sub Sub) (bool, error) {
 		"sent",
 	).Result()
 	if err != nil {
-		return true, err
+		s.Fail(batch, sub, err)
+		return
 	}
 
 	logger.Infof("Successfully sent %s to %s", batch.Key(), sub.URL)
+}
 
-	return true, nil
+func (s HttpBatchSender) Fail(batch Batch, sub Sub, err error) {
+	logger.Errorf("Failed to correctly %s:%s: %s", batch.Key(), sub.URL, err.Error())
+	logger.Error("Message in incorrect state")
+	// TODO(revert to previous state)
 }
 
 // Fail is responsible for placing the batch sub combo into failed state
 // and setting retry count, time etc.
-func (s HttpBatchSender) Fail(batch Batch, sub Sub) error {
+func (s HttpBatchSender) Retry(batch Batch, sub Sub) {
 	logger.Noticef("Failed to send %s to %s ", batch.Key(), sub.URL)
-	tx := Redis.Multi()
-	defer tx.Close()
 
 	key := fmt.Sprintf("%s:%s", batch.Timestamp, sub.URL)
 	rootKey := fmt.Sprintf("webhooks:batches:%s", batch.DomainId)
 
 	// Set the state to failed
-	_, err := tx.HSet(
+	_, err := Redis.HSet(
 		fmt.Sprintf("%s:status", rootKey),
 		key,
 		"resend",
 	).Result()
 	if err != nil {
-		return err
+		logger.Error(err.Error())
+		return
 	}
 
 	// Update the retry count
-	count, err := tx.Incr(
+	count, err := Redis.Incr(
 		fmt.Sprintf("%s:%s:retries", rootKey, sub.URL),
 	).Result()
 	if err != nil {
-		return err
+		logger.Error(err.Error())
+		return
 	}
+
+	duration := backoffDuration(int(count))
+	logger.Noticef("Retrying in %s", duration)
 
 	// Set the next send time
-	resendTime := time.Now().Add(
-		backoffDuration(int(count)),
-	)
-	resendTimeStr := fmt.Sprintf("%d", resendTime.Unix())
-	_, err = tx.HSet(fmt.Sprintf("%s:retries", rootKey), key, resendTimeStr).Result()
+	resendTime := time.Now().Add(duration)
+	z := redis.Z{float64(resendTime.Unix()), batch.DomainId + ":" + key}
+	_, err = Redis.ZAdd("webhooks:sends:retry", z).Result()
 	if err != nil {
-		return err
+		logger.Error(err.Error())
+		return
 	}
 
-	_, err = tx.Exec(func() error { return nil })
-
-	return err
 }
 
 func backoffDuration(retryCount int) time.Duration {
