@@ -284,7 +284,7 @@ func (s HttpBatchSender) Send(batch Batch, sub Sub) {
 		return
 	}
 
-	body, err := json.Marshal(batch.Events)
+	body, err := json.Marshal(batch)
 	if err != nil {
 		s.Fail(batch, sub, err)
 		return
