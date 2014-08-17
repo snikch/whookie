@@ -46,6 +46,9 @@ func (batch Batch) Filtered(sub Sub) (Batch, bool) {
 	// Create a hash lookup of valid events.
 	eventMap := map[string]bool{}
 	for _, e := range sub.Events {
+		if e == "all" {
+			return batch, len(batch.Events) > 0
+		}
 		eventMap[e] = true
 	}
 
