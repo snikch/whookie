@@ -22,10 +22,10 @@ func init() {
 
 // Batch represents a group of events that occurred in a given timeperiod for a domain
 type Batch struct {
-	DomainId  string
-	Timestamp string
-	StartedAt time.Time
-	Events    []Event
+	DomainId  string    `json:"domain_id"`
+	Timestamp string    `json:"-"`
+	StartedAt time.Time `json:"-"`
+	Events    []Event   `json:"events"`
 }
 
 func (b Batch) BlankClone() Batch {
