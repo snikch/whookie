@@ -55,7 +55,7 @@ func (batch Batch) Filtered(sub Sub) (Batch, bool) {
 	// Loops through the supplied batch and add valid events.
 	for _, event := range batch.Events {
 		_, match := eventMap[event.Type]
-		if match {
+		if match || event.Type == "test" {
 			out.Events = append(out.Events, event)
 		}
 	}
