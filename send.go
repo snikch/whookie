@@ -1,4 +1,4 @@
-package webhooks
+package whookie
 
 import (
 	"encoding/json"
