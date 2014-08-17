@@ -7,10 +7,7 @@ type Sub struct {
 	Events   []string
 	Headers  map[string]string
 	URL      string
-}
-
-func (s Sub) Key() string {
-	return s.DomainId + ":" + s.URL
+	Id       string
 }
 
 type SubFinder interface {
@@ -28,7 +25,7 @@ type RedisSubFinder struct {
 func (f RedisSubFinder) Subs(domainId string) ([]Sub, error) {
 	subs := []Sub{}
 
-	subscriptionUrls, err := Redis.SMembers(
+	subscriptionIds, err := Redis.SMembers(
 		fmt.Sprintf("webhooks:subscriptions:%s", domainId),
 	).Result()
 
@@ -36,8 +33,8 @@ func (f RedisSubFinder) Subs(domainId string) ([]Sub, error) {
 		return nil, err
 	}
 
-	for _, url := range subscriptionUrls {
-		sub, err := f.Sub(domainId, url)
+	for _, id := range subscriptionIds {
+		sub, err := f.Sub(domainId, id)
 		if err != nil {
 			return nil, err
 		}
@@ -46,27 +43,35 @@ func (f RedisSubFinder) Subs(domainId string) ([]Sub, error) {
 	return subs, nil
 }
 
-func (f RedisSubFinder) Sub(domainId, url string) (Sub, error) {
+func (f RedisSubFinder) Sub(domainId, id string) (Sub, error) {
 
 	sub := Sub{
-		URL:      url,
+		Id:       id,
 		DomainId: domainId,
 	}
 
+	url, err := Redis.Get(
+		fmt.Sprintf("webhooks:subscriptions:%s:%s:url", domainId, id),
+	).Result()
+	if err != nil {
+		return sub, err
+	}
+
 	headers, err := Redis.HGetAllMap(
-		fmt.Sprintf("webhooks:subscriptions:%s:%s:headers", domainId, url),
+		fmt.Sprintf("webhooks:subscriptions:%s:%s:headers", domainId, id),
 	).Result()
 	if err != nil {
 		return sub, err
 	}
 
 	events, err := Redis.SMembers(
-		fmt.Sprintf("webhooks:subscriptions:%s:%s:events", domainId, url),
+		fmt.Sprintf("webhooks:subscriptions:%s:%s:events", domainId, id),
 	).Result()
 	if err != nil {
 		return sub, err
 	}
 
+	sub.URL = url
 	sub.Headers = headers
 	sub.Events = events
 

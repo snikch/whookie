@@ -229,7 +229,7 @@ func (p RedisBatchProcessor) PersistBatch(tx *redis.Multi, batch Batch, sub Sub)
 	}
 
 	rootKey := fmt.Sprintf("webhooks:sends:%s", batch.DomainId)
-	sendKey := batch.Timestamp + ":" + sub.URL
+	sendKey := batch.Timestamp + ":" + sub.Id
 
 	_, err = tx.HSet(rootKey+":batch", sendKey, string(payload)).Result()
 	if err != nil {
@@ -242,7 +242,7 @@ func (p RedisBatchProcessor) PersistBatch(tx *redis.Multi, batch Batch, sub Sub)
 		return err
 	}
 
-	_, err = tx.SAdd("webhooks:sends:ready", batch.Key()+":"+sub.URL).Result()
+	_, err = tx.SAdd("webhooks:sends:ready", batch.Key()+":"+sub.Id).Result()
 	if err != nil {
 		return err
 	}
@@ -270,7 +270,7 @@ type HttpBatchSender struct{}
 func (s HttpBatchSender) Send(batch Batch, sub Sub) {
 	logger.Infof("Sending batch with %d events to %s", len(batch.Events), sub.URL)
 
-	key := fmt.Sprintf("%s:%s", batch.Timestamp, sub.URL)
+	key := fmt.Sprintf("%s:%s", batch.Timestamp, sub.Id)
 	rootKey := fmt.Sprintf("webhooks:batches:%s", batch.DomainId)
 
 	// Set the state to sending
@@ -355,7 +355,7 @@ func (s HttpBatchSender) Retry(batch Batch, sub Sub) {
 
 	// Update the retry count
 	count, err := Redis.Incr(
-		fmt.Sprintf("%s:%s:retries", rootKey, sub.URL),
+		fmt.Sprintf("%s:%s:retries", rootKey, sub.Id),
 	).Result()
 	if err != nil {
 		logger.Error(err.Error())
